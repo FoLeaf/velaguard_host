@@ -1,14 +1,17 @@
 # VelaGuard Host 上位机
 
-面向 [contest2026_004_TeamFalcons / VelaGuard](\\wsl.localhost\Debian\home\hello19y\openvela\contest2026_004_TeamFalcons) 的 Windows 配置/监视上位机。
+面向 [contest2026_004_TeamFalcons / VelaGuard](\\wsl.localhost\Debian\home\hello19y\openvela\contest2026_004_TeamFalcons) 的 Windows 点表配置上位机。
 
-**以原工程 UI 为基础**（Qt Designer `window.py` / `config.py` / `sourcecard_ui.py` + PNG 图标资源），主机通信改为 **openvela NSH 文本协议**（ST-LINK COM3，115200 8N1）。
+**以原工程 UI 为基础**（Qt Designer `window.py` / `config.py` / `sourcecard_ui.py` + PNG 图标资源）。
 
-- 侧栏图标：`dashboard.png` / `data.png` / `configuration.png` 等（`res.qrc` → `res_rc.py`）
-- 数据源卡片：`sensor.png`（`sourcecard_src.qrc`）
-- 不占用 RS485；落盘需在控制台手动 `vgdiscover apply --confirm`
-- 协议规范：[`docs/PROTOCOL.md`](docs/PROTOCOL.md)
-- 特性说明：[`docs/compose/spec/velaguard-host.md`](docs/compose/spec/velaguard-host.md)
+主机口按板端 **`vgpoint` NSH 协议**；**唯一权威**是板端文档：
+
+`contest2026_004_TeamFalcons/docs/velaguard-host-nsh-protocol.md`
+
+- 侧栏图标：`dashboard.png` / `data.png` / `configuration.png`（`res.qrc`）
+- 点位卡片：`sensor.png`（`sourcecard_src.qrc`）
+- 流程：**新增点位 → 试读候选 → 人工确认 → 确认落盘**（`vgpoint apply --confirm`）
+- 上位机对齐说明：[`docs/PROTOCOL.md`](docs/PROTOCOL.md)
 
 ## 运行
 
@@ -29,13 +32,13 @@ python -m venv .venv
 
 | 路径 | 职责 |
 |------|------|
-| `main.py` | 入口；挂接原 UI 与 NSH |
-| `window.py` / `res_rc.py` | 主窗口 Designer 生成 + 图标资源 |
-| `config.py` | 添加数据源对话框 |
-| `sourcecard_ui.py` / `sourcecard_src_rc.py` | 传感器卡片 + sensor 图 |
-| `velaguard_host/nsh_session.py` | 串口行会话 |
-| `velaguard_host/protocol.py` | NSH 命令构造 / 输出解析 |
+| `main.py` | 入口；原 UI + vgpoint 接线 |
+| `window.py` / `res_rc.py` / `*.png` | 主窗口与图标 |
+| `config.py` | 新增点位对话框 |
+| `sourcecard_ui.py` | 点位卡片 |
+| `velaguard_host/protocol.py` | `vgpoint` 构造/解析 |
+| `velaguard_host/nsh_session.py` | NSH 行会话 |
 | `velaguard_host/worker.py` | Qt 工作线程 |
-| `tests/test_protocol.py` | 协议单测（无硬件） |
+| `tests/test_protocol.py` | 协议单测 |
 
-旧 `EB90/ED` 二进制帧路径已废弃，见 `docs/PROTOCOL.md` §9。
+说明：板端 `vgpoint` 若尚未合入，串口会回 command not found——上位机仍按规范发送。

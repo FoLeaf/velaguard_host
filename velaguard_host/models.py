@@ -1,4 +1,4 @@
-"""Data models for VelaGuard host (no Qt dependency)."""
+"""VelaGuard Host point models (no Qt)."""
 
 from __future__ import annotations
 
@@ -20,21 +20,23 @@ class ProbeBlock:
     sample1: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class Point:
     tag: str
     addr: int
-    fc: int
-    reg: int
-    qty: int
-    dtype: str
-    scale: float
+    fc: int = 3
+    reg: int = 0
+    qty: int = 1
+    dtype: str = "int16"
+    scale: float = 1.0
     unit: str = ""
+    cmp: str = ""  # ge | le | eq | empty
+    warn: Optional[float] = None
+    crit: Optional[float] = None
+    fail_n: int = 3
 
     def scaled(self, raw: int) -> float:
-        if self.dtype in ("int16", "uint16", "int", "uint"):
-            return raw * self.scale
-        return float(raw)
+        return float(raw) * float(self.scale)
 
 
 @dataclass
@@ -62,6 +64,27 @@ class TestReadResult:
 
 
 @dataclass
+class VgPointStatus:
+    """One stable vgpoint OK/ERR line."""
+
+    ok: bool
+    cmd: str = ""
+    table: str = ""  # candidate | committed
+    n: int = 0
+    code: str = ""
+    msg: str = ""
+    raw: str = ""
+
+
+@dataclass
+class VgPointRead:
+    tag: str
+    raw: Optional[int]
+    value: Optional[float]
+    ok: bool
+
+
+@dataclass
 class FrameStats:
     slave: int
     window: int = 0
@@ -84,7 +107,7 @@ class FrameStats:
 
 @dataclass
 class DeviceInfo:
-    source: str = ""  # OK | FACTORY | unknown
+    source: str = ""
     seq: int = 0
     schema: int = 0
     committed: int = 0

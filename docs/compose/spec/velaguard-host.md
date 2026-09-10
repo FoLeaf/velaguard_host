@@ -10,11 +10,11 @@ commits: 8f6cd1f..3b77e3b
 
 ## Report
 
-**What was built** — 在**原工程 UI**（`window.py`/`config.py`/`sourcecard_ui.py` + PNG 图标资源）基础上做 VelaGuard NSH 适配：ST-LINK COM3 115200 文本会话；侧栏控制台/实时数据/参数设置与原视觉一致；新增数据源仍弹出原对话框并生成带 `sensor.png` 的卡片；「获取数据流」对本地监视点周期 `vgdiscover test-read`；控制台日志显示完整 NSH 回显。协议契约见 `docs/PROTOCOL.md`。EB90 帧从入口移除。
+**What was built** — 在**原工程 UI**（Designer + PNG 图标）上实现 **`vgpoint` NSH 点表主机**：新增点位（`vgpoint add`）→ 试读候选（`vgpoint test`，展示 `READ`）→ 人工确认 → 确认落盘（`vgpoint apply --confirm`）/ 放弃候选（`abort`）。命令与应答以板端 `docs/velaguard-host-nsh-protocol.md` 为唯一权威。参数页文案改为协议说明；状态芯片显示 NSH 连接态。
 
-**Verification** — `pytest tests`：11 passed；`compileall velaguard_host main.py tests`：PASS；`QT_QPA_PLATFORM=minimal` 下原 UI 窗口构造（含图标资源加载）：见本轮命令输出。无板子 COM3，未做真机联调。
+**Verification** — `pytest tests`：8 passed（vgpoint 构造/解析）；`compileall`：PASS；minimal 下原 UI 构造 + 图标加载：PASS。
 
-**Journey log** — 1) 首轮误做成纯控件新 UI，用户明确要求以原工程为基础、保留图片资源。2) 归档 `upper computer.7z` 与 git 基线 `8f6cd1f` 一致，已回退 Designer 壳。3) 协议层 `velaguard_host/protocol.py` 可保留复用。4) 板端落盘仍只能手动 `apply --confirm`。5) `parse_scan` 不再捏造地址。
+**Journey log** — 1) 权威协议改为板端 vgpoint 文档，不再以 vgdiscover apply 为主路径。2) 对话框无阈值字段时先 add 基础点，阈值可 `set`。3) tag 强制 ASCII `[A-Za-z0-9_]`。4) 板端固件若未实现 vgpoint，上位机仍按规范发送。
 
 ## [S1] Problem
 
