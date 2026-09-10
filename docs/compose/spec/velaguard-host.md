@@ -1,14 +1,20 @@
 ---
 feature: velaguard-host
-status: designed
+status: delivered
 updated: 2026-09-09
 branch: feature/velaguard-host
-commits: 8f6cd1f..76dc810
+commits: 8f6cd1f..a22db3d
 ---
 
 # VelaGuard 上位机主机侧适配
 
 ## Report
+
+**What was built** — 将未完成的通用 PyQt5 网关工具重写为 VelaGuard **NSH 配置/监视主机**：ST-LINK COM3 115200 文本会话；`vgdiscover` 扫描/探测/dump/试读/`apply`（落盘需独立确认）；点表 JSON 拉取与表格展示；`vgcfg`/`vgstats`；周期监视；自由终端与日志。协议契约写在 `docs/PROTOCOL.md`，与板端 `vgdiscover.c`/`vgcfg.c`/`vgstats.c`/`modbus_collector.c` 交叉引用。旧 `EB90/ED` 二进制帧从主入口移除（板端本无实现）。
+
+**Verification** — `pytest tests`：11 passed；`compileall velaguard_host main.py tests`：PASS；`QT_QPA_PLATFORM=minimal` 下窗口构造（标题 + 4 个 Tab）：PASS。无板子 COM3，未做真机联调。
+
+**Journey log** — 1) 用户选定 NSH 而非二进制帧，与 `09-09-nsh-vgpoint-host-editor` 对齐但 Host 只用已实现命令。2) 项目 PRD R7 原写「先不要 Windows GUI」；本任务按用户显式要求交付 GUI，文档中标明与 R7 的差异。3) 本地 `.venv` 损坏已重建；PyQt5 首装走清华镜像。4) `SerialController` 初版线程模型在 minimal platform 下崩溃，改为无 parent 的 `QThread` + queued signals。5) `parse_scan` 曾在仅有 `found N` 时捏造 `addr=1..N`，审查后删除该降级。
 
 ## [S1] Problem
 
@@ -117,9 +123,9 @@ tests/test_protocol.py       # 解析器与命令构造单测（无 GUI）
 
 ## Tasks
 
-- [ ] T1: 协议模块 `protocol.py` + `models.py` + `nsh_session.py` — acceptance: 命令构造与输出解析单测通过；无 Qt 依赖 (covers: S2.1 S2.2 S2.4)
-- [ ] T2: GUI 骨架 `app_window.py` + `worker.py` + `main.py` — acceptance: 可列出端口、打开串口、发 `?` 并显示回显 (covers: S2.4 S2.5)
-- [ ] T3: 探查/点表/监视/终端页面接线 — acceptance: 扫描与 test-read 路径调用正确命令；apply 有独立确认 (covers: S2.2 S2.3 S2.5)
-- [ ] T4: `docs/PROTOCOL.md` + `requirements.txt` + 依赖修复说明 — acceptance: 协议文档与 `protocol.py` 字面量一致；requirements 可装 (covers: S2.6)
-- [ ] T5: 清理旧主路径引用 — acceptance: `python -m compileall` 通过；`main.py` 不再依赖 EB90 帧 (covers: S2.4)
-- [ ] T6: 单测与静态验证 — acceptance: `pytest tests` 全绿；compileall 通过 (covers: S2 S3)
+- [x] T1: 协议模块 `protocol.py` + `models.py` + `nsh_session.py` — acceptance: 命令构造与输出解析单测通过；无 Qt 依赖 (covers: S2.1 S2.2 S2.4)
+- [x] T2: GUI 骨架 `app_window.py` + `worker.py` + `main.py` — acceptance: 可列出端口、打开串口、发 `?` 并显示回显 (covers: S2.4 S2.5)
+- [x] T3: 探查/点表/监视/终端页面接线 — acceptance: 扫描与 test-read 路径调用正确命令；apply 有独立确认 (covers: S2.2 S2.3 S2.5)
+- [x] T4: `docs/PROTOCOL.md` + `requirements.txt` + 依赖修复说明 — acceptance: 协议文档与 `protocol.py` 字面量一致；requirements 可装 (covers: S2.6)
+- [x] T5: 清理旧主路径引用 — acceptance: `python -m compileall` 通过；`main.py` 不再依赖 EB90 帧 (covers: S2.4)
+- [x] T6: 单测与静态验证 — acceptance: `pytest tests` 全绿；compileall 通过 (covers: S2 S3)

@@ -131,10 +131,6 @@ def parse_scan(text: str) -> list[ProbeHit]:
     hits: list[ProbeHit] = []
     for m in re.finditer(r"^\s*addr=(\d+)\s*$", strip_prompt(text), re.MULTILINE):
         hits.append(ProbeHit(addr=int(m.group(1))))
-    m = re.search(r"found\s+(\d+)\s+slave", strip_prompt(text))
-    if m and not hits:
-        # count-only line without listed addrs still signals success
-        return [ProbeHit(addr=i + 1) for i in range(int(m.group(1)))]
     return hits
 
 

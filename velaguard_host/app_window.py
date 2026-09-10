@@ -49,6 +49,7 @@ class VelaGuardHost(QMainWindow):
         self._ctl.command_failed.connect(self._on_command_failed)
 
         self._pending = ""  # last command for dispatch
+        self._pending_points_live = True
         self._table_live = PointTable()
         self._table_cand = PointTable()
         self._monitor_timer = QTimer(self)

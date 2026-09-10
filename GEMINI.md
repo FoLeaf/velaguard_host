@@ -2,69 +2,42 @@
 
 ## Project Overview
 
-This is a Python GUI application built with PyQt5. It serves as a "gateway tool" for interacting with devices over a serial port and communicating with an MQTT server. The application allows users to configure data sources, monitor real-time data, and manage MQTT connections.
+VelaGuard Host — Windows PyQt5 upper computer for the openvela VelaGuard
+gateway (`contest2026_004_TeamFalcons`). Talks **NSH text** over ST-LINK VCP
+(default COM3 @ 115200 8N1). Does **not** speak RS485/Modbus as a master and
+does **not** use the retired EB90 binary frame.
 
-**Key Technologies:**
-
-*   Python
-*   PyQt5
-*   MQTT
+**Key Technologies:** Python 3, PyQt5, pyserial
 
 ## Building and Running
 
-**1. Prerequisites:**
-
-*   Python 3
-*   PyQt5
-
-**2. Installation:**
-
-Install the required Python library:
-
-```bash
-pip install PyQt5
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
 
-**3. Running the Application:**
-
-To start the application, run the following command in your terminal:
-
-```bash
-python main.py
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -v
 ```
+
+## Architecture
+
+- `main.py` — entry
+- `velaguard_host/nsh_session.py` — serial line session / prompt wait
+- `velaguard_host/protocol.py` — NSH command builders + response parsers
+- `velaguard_host/worker.py` — Qt worker thread + controller
+- `velaguard_host/app_window.py` — main window (connection / discover / points / monitor / console)
+- `docs/PROTOCOL.md` — host↔device protocol spec
+- `docs/compose/spec/velaguard-host.md` — feature design + report
+
+Legacy Designer-generated UI (`window.py`, `config.py`, `sourcecard_ui.py`)
+and `main1.py` remain as historical baseline only; the live entrypoint does
+not import them.
 
 ## Development Conventions
 
-### UI Files
-
-The user interface is designed using Qt Designer, and the `.ui` files are located in the root directory. These files are then converted to Python code.
-
-*   `untitled.ui`: Main window UI.
-*   `addsource.ui`: "Add data source" dialog UI.
-
-To update the UI, you can edit the `.ui` files in Qt Designer and then regenerate the Python files using the `pyuic5` command:
-
-```bash
-pyuic5 -x untitled.ui -o window.py
-pyuic5 -x addsource.ui -o config.py
-```
-
-### Resource Files
-
-Image resources are managed using a Qt Resource Collection file (`.qrc`).
-
-*   `res.qrc`: Lists the image files used in the application.
-
-To update the resources, edit the `.qrc` file and then regenerate the Python file using the `pyrcc5` command:
-
-```bash
-pyrcc5 res.qrc -o res_rc.py
-```
-
-### Code Structure
-
-*   `main.py`: The main entry point of the application.
-*   `window.py`: Contains the main window's UI and logic (generated from `untitled.ui`).
-*   `config.py`: Contains the "add data source" dialog's UI and logic (generated from `addsource.ui`).
-*   `res_rc.py`: Contains the compiled resources (generated from `res.qrc`).
-
+- Board CLI output is the contract: if firmware printf text changes, update
+  `protocol.py` **and** `docs/PROTOCOL.md` §5 in the same change.
+- `vgdiscover apply --confirm` must stay a separate, user-confirmed action.
+- Protocol parsers must not import Qt.
