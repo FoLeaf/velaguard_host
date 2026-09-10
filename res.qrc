@@ -1,0 +1,11 @@
+<RCC>
+  <qresource prefix="icon">
+    <file>cloud-fill.png</file>
+    <file>close.png</file>
+    <file>Minimize.png</file>
+    <file>configuration.png</file>
+    <file>dashboard.png</file>
+    <file>data.png</file>
+    <file>setting.png</file>
+  </qresource>
+</RCC>
