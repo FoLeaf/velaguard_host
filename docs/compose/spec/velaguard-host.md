@@ -3,7 +3,7 @@ feature: velaguard-host
 status: delivered
 updated: 2026-09-09
 branch: feature/velaguard-host
-commits: 8f6cd1f..HEAD
+commits: 8f6cd1f..3b77e3b
 ---
 
 # VelaGuard 上位机主机侧适配
