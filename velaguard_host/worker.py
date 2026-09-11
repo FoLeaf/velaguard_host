@@ -34,7 +34,7 @@ class SerialWorker(QObject):
         try:
             session = NshSession(port, baud)
             session.open()
-            boot = session.wait_boot_prompt(timeout_s=8.0)
+            boot = session.wait_boot_prompt(timeout_s=1.5)
             if boot:
                 self.log.emit(boot)
             self._session = session

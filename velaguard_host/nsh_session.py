@@ -9,7 +9,7 @@ from typing import Optional
 import serial
 import serial.tools.list_ports
 
-from .protocol import PROMPT_RE
+from .protocol import has_prompt
 
 
 class NshError(Exception):
@@ -90,7 +90,7 @@ class NshSession:
         self,
         command: str,
         timeout_s: float = 20.0,
-        settle_ms: int = 800,
+        settle_ms: int = 0,
     ) -> str:
         """Write one NSH line and wait until prompt returns."""
         if not self.is_open or self._ser is None:
@@ -105,7 +105,8 @@ class NshSession:
         except serial.SerialException as exc:
             raise NshError(f"写串口失败: {exc}") from exc
 
-        time.sleep(settle_ms / 1000.0)
+        if settle_ms:
+            time.sleep(settle_ms / 1000.0)
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
@@ -114,18 +115,26 @@ class NshSession:
                 raise NshError(f"读串口失败: {exc}") from exc
             if data:
                 self._rx += data.decode("utf-8", errors="replace")
-                if PROMPT_RE.search(self._rx):
+                if has_prompt(self._rx):
                     return self._rx
             else:
                 time.sleep(0.02)
-        # Timeout: return whatever we got; caller decides.
         return self._rx
 
-    def wait_boot_prompt(self, timeout_s: float = 25.0) -> str:
+    def wait_boot_prompt(self, timeout_s: float = 1.5) -> str:
+        """Idle boards already sit at nsh>; poke LF instead of waiting for boot spam."""
         if not self.is_open or self._ser is None:
             raise NshError("串口未打开")
-        deadline = time.time() + timeout_s
         self._rx = ""
+        self.drain(0.05)
+        if has_prompt(self._rx) or re.search(r"AI Agent ready", self._rx):
+            return self._rx
+        try:
+            self._ser.write(b"\n")
+            self._ser.flush()
+        except serial.SerialException as exc:
+            raise NshError(f"写串口失败: {exc}") from exc
+        deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
                 data = self._ser.read(4096)
@@ -133,8 +142,8 @@ class NshSession:
                 raise NshError(f"读串口失败: {exc}") from exc
             if data:
                 self._rx += data.decode("utf-8", errors="replace")
-                if re.search(r"(nsh>|vela>|AI Agent ready)", self._rx):
+                if has_prompt(self._rx) or re.search(r"AI Agent ready", self._rx):
                     return self._rx
             else:
-                time.sleep(0.05)
+                time.sleep(0.02)
         return self._rx
