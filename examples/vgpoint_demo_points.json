@@ -4,7 +4,8 @@
   "hits": [1, 2],
   "points": [
     {
-      "tag": "temp",
+      "id": "temp",
+      "name": "温度",
       "addr": 1,
       "fc": 3,
       "reg": 0,
@@ -18,7 +19,8 @@
       "fail_n": 3
     },
     {
-      "tag": "flood",
+      "id": "flood",
+      "name": "水浸",
       "addr": 2,
       "fc": 3,
       "reg": 2,

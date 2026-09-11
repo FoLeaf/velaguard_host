@@ -378,6 +378,55 @@ QPushButton#CardDelete:hover {
     border-radius: 6px;
 }
 
+QPushButton#CardEdit {
+    background: transparent;
+    border: none;
+    color: #9AA3AD;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0;
+    font-size: 13px;
+}
+
+QPushButton#CardEdit:hover {
+    color: #FFFFFF;
+    background-color: #2EC4B6;
+    border-radius: 6px;
+}
+
+QPushButton#CardEdit:disabled {
+    color: #3A424A;
+}
+
+QCheckBox#CardSelect {
+    spacing: 0;
+    background: transparent;
+}
+
+QCheckBox#CardSelect::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid #3A424A;
+    background-color: #1A1D21;
+}
+
+QCheckBox#CardSelect::indicator:hover {
+    border-color: #2EC4B6;
+}
+
+QCheckBox#CardSelect::indicator:checked {
+    background-color: #2EC4B6;
+    border-color: #2EC4B6;
+}
+
+QCheckBox#CardSelect::indicator:disabled {
+    background-color: #24292E;
+    border-color: #3A424A;
+}
+
 QLabel#EmptyHint {
     color: #9AA3AD;
     font-size: 14px;

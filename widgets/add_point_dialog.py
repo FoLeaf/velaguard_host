@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 
-def sanitize_tag(name: str, fallback: str = "p1") -> str:
+def sanitize_id(name: str, fallback: str = "p1") -> str:
     raw = (name or fallback or "p1").strip()
     out = []
     for ch in raw:
@@ -27,10 +27,13 @@ def sanitize_tag(name: str, fallback: str = "p1") -> str:
             out.append(ch)
         else:
             out.append("_")
-    tag = "".join(out)[:23].strip("_") or fallback
-    if tag[0].isdigit():
-        tag = "t_" + tag
-    return tag[:23]
+    point_id = "".join(out)[:23].strip("_") or fallback
+    if point_id[0].isdigit():
+        point_id = "t_" + point_id
+    return point_id[:23]
+
+
+sanitize_tag = sanitize_id
 
 
 def parse_int_field(text: str, default: int = 0) -> int:
@@ -50,7 +53,7 @@ def parse_scale(text: str) -> float:
 
 @dataclass
 class AddPointResult:
-    tag: str
+    id: str
     name: str
     addr: int
     fc: int
@@ -66,21 +69,29 @@ class AddPointResult:
 
 
 class AddPointDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, existing: Optional[AddPointResult] = None):
         super().__init__(parent)
-        self.setWindowTitle("新增点位")
+        self._existing = existing
+        self.setWindowTitle("编辑点位" if existing else "新增点位")
         self.setModal(True)
         self.setMinimumWidth(420)
         self._build()
+        if existing is not None:
+            self._fill(existing)
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
-        title = QLabel("新增点位")
+        editing = self._existing is not None
+        title = QLabel("编辑点位" if editing else "新增点位")
         title.setObjectName("PageTitle")
-        hint = QLabel("写入候选表（vgpoint add）。试读通过后再单独确认落盘。")
+        hint = QLabel(
+            "写入候选表（vgpoint set）。id 是主键不能改，name 可改。已确认表要等确认落盘才变。"
+            if editing
+            else "写入候选表（vgpoint add -i / -N）。试读通过后再单独确认落盘。"
+        )
         hint.setObjectName("PageHint")
         hint.setWordWrap(True)
         root.addWidget(title)
@@ -91,8 +102,12 @@ class AddPointDialog(QDialog):
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
 
+        self.edit_id = QLineEdit()
+        self.edit_id.setPlaceholderText("id: temp / flood_1")
+        self.edit_id.setMaxLength(23)
         self.edit_name = QLineEdit()
-        self.edit_name.setPlaceholderText("tag: temp / flood_1")
+        self.edit_name.setPlaceholderText("显示名，可中文；空则等于 id")
+        self.edit_name.setMaxLength(47)
         self.edit_addr = QLineEdit()
         self.edit_addr.setPlaceholderText("1 或 0x01")
         self.edit_addr.setText("1")
@@ -113,8 +128,10 @@ class AddPointDialog(QDialog):
         self.edit_scale.setText("1")
         self.edit_unit = QLineEdit()
         self.edit_unit.setPlaceholderText("C / 空，ASCII ≤7")
+        self.edit_unit.setMaxLength(7)
 
-        form.addRow("名称 / tag", self.edit_name)
+        form.addRow("id（主键）", self.edit_id)
+        form.addRow("显示名 name", self.edit_name)
         form.addRow("从机地址", self.edit_addr)
         form.addRow("功能码", self.combo_fc)
         form.addRow("起始寄存器", self.edit_reg)
@@ -144,7 +161,7 @@ class AddPointDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_btn = buttons.button(QDialogButtonBox.Ok)
-        ok_btn.setText("加入候选")
+        ok_btn.setText("保存到候选" if self._existing is not None else "加入候选")
         ok_btn.setProperty("kind", "primary")
         ok_btn.style().unpolish(ok_btn)
         ok_btn.style().polish(ok_btn)
@@ -156,14 +173,40 @@ class AddPointDialog(QDialog):
         row.addWidget(buttons)
         root.addLayout(row)
 
+    def _select_data(self, combo: QComboBox, value) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.setCurrentIndex(i)
+                return
+
+    def _fill(self, spec: AddPointResult) -> None:
+        self.edit_id.setText(spec.id)
+        self.edit_id.setReadOnly(True)
+        self.edit_id.setToolTip("id 是主键，不能改")
+        self.edit_name.setText(spec.name or spec.id)
+        self.edit_name.setReadOnly(False)
+        self.edit_addr.setText(str(spec.addr))
+        self._select_data(self.combo_fc, int(spec.fc))
+        self.edit_reg.setText(str(spec.reg))
+        self.edit_qty.setText(str(spec.qty))
+        self._select_data(self.combo_dtype, spec.dtype or "int16")
+        self.edit_scale.setText(spec.formula or str(spec.scale) or "1")
+        self.edit_unit.setText(spec.unit or "")
+        self._select_data(self.combo_cmp, spec.cmp or "")
+        self.edit_warn.setText("" if spec.warn is None else str(spec.warn))
+        self.edit_crit.setText("" if spec.crit is None else str(spec.crit))
+
     def result_values(self) -> AddPointResult:
-        name = self.edit_name.text().strip()
-        tag = sanitize_tag(name, fallback="p1")
+        if self._existing is not None:
+            point_id = self._existing.id
+        else:
+            point_id = self.edit_id.text().strip()
+        name = self.edit_name.text().strip() or point_id
         warn_txt = self.edit_warn.text().strip()
         crit_txt = self.edit_crit.text().strip()
         return AddPointResult(
-            tag=tag,
-            name=name or tag,
+            id=point_id,
+            name=name,
             addr=parse_int_field(self.edit_addr.text(), 1),
             fc=int(self.combo_fc.currentData()),
             reg=parse_int_field(self.edit_reg.text(), 0),

@@ -34,8 +34,10 @@ CANDIDATE_PATH = "/data/velaguard/discover/point_table_candidate.json"
 POINTS_PATH = "/data/velaguard/config/points.json"
 MAX_CMD_BYTES = 120
 MAX_POINTS = 32
-TAG_RE = re.compile(r"^[A-Za-z0-9_]{1,23}$")
+ID_RE = re.compile(r"^[A-Za-z0-9_]{1,23}$")
+TAG_RE = ID_RE  # 旧名；主键已改为 id
 CMP_VALUES = ("ge", "le", "eq")
+MAX_NAME_BYTES = 47
 
 _OK_RE = re.compile(
     r"^vgpoint:\s+OK\s+cmd=(\S+)\s+table=(\S+)\s+n=(\d+)\s*$", re.MULTILINE
@@ -56,6 +58,7 @@ class ImportRow:
     point: Point
     error: str = ""
     add_cmd: str = ""
+    set_name_cmd: str = ""
 
     @property
     def ok(self) -> bool:
@@ -73,9 +76,10 @@ def cmd_point_list(candidate: bool = False) -> str:
 
 
 def cmd_point_add(
-    tag: str,
+    point_id: str,
     addr: int,
     reg: int,
+    name: str = "",
     fc: int = 3,
     qty: int = 1,
     dtype: str = "int16",
@@ -86,7 +90,7 @@ def cmd_point_add(
     crit: Optional[float] = None,
     fail_n: int = 3,
 ) -> str:
-    tag = _check_tag(tag)
+    point_id = _check_id(point_id)
     addr = _check_addr(addr)
     reg = _check_reg(reg)
     fc = _check_fc(fc)
@@ -95,15 +99,13 @@ def cmd_point_add(
     unit = _check_unit(unit)
     cmp = _check_cmp(cmp)
     fail_n = _check_fail_n(fail_n)
-    parts = [
-        "vgpoint",
-        "add",
-        "-t",
-        tag,
-        "-a",
-        str(addr),
-        "-r",
-        str(reg),
+    name = (name or "").strip()
+    if name and name != point_id:
+        name = _check_name(name)
+    else:
+        name = ""
+    head = ["vgpoint", "add", "-i", point_id, "-a", str(addr), "-r", str(reg)]
+    rest = [
         "-f",
         str(fc),
         "-q",
@@ -114,22 +116,28 @@ def cmd_point_add(
         _fmt_num(scale),
     ]
     if unit:
-        parts += ["-u", unit]
+        rest += ["-u", unit]
     if cmp:
-        parts += ["-k", cmp]
+        rest += ["-k", cmp]
     if warn is not None:
-        parts += ["-w", _fmt_num(warn)]
+        rest += ["-w", _fmt_num(warn)]
     if crit is not None:
-        parts += ["-C", _fmt_num(crit)]
+        rest += ["-C", _fmt_num(crit)]
     if fail_n != 3:
-        parts += ["-n", str(fail_n)]
-    return _check_length(" ".join(parts))
+        rest += ["-n", str(fail_n)]
+    if name:
+        with_name = " ".join(head + ["-N", name] + rest)
+        if cmd_byte_len(with_name) <= MAX_CMD_BYTES:
+            return with_name
+    return _check_length(" ".join(head + rest))
 
 
-def cmd_point_set(tag: str, **fields) -> str:
+def cmd_point_set(point_id: str, **fields) -> str:
     """Set optional fields on candidate. Clear: cmp='-', warn='-'/None with '-', etc."""
-    tag = _check_tag(tag)
-    parts = ["vgpoint", "set", tag]
+    point_id = _check_id(point_id)
+    parts = ["vgpoint", "set", point_id]
+    if "name" in fields and fields["name"] is not None:
+        parts += ["-N", _check_name(str(fields["name"]))]
     mapping = [
         ("addr", _check_addr),
         ("reg", _check_reg),
@@ -171,9 +179,10 @@ def cmd_point_set(tag: str, **fields) -> str:
 
 def cmd_point_add_from_point(point: Point) -> str:
     return cmd_point_add(
-        tag=point.tag,
+        point_id=point.id,
         addr=point.addr,
         reg=point.reg,
+        name=point.name,
         fc=point.fc,
         qty=point.qty,
         dtype=point.dtype,
@@ -186,30 +195,58 @@ def cmd_point_add_from_point(point: Point) -> str:
     )
 
 
+def _set_fields_from_point(point: Point, include_name: bool) -> dict:
+    fields = {
+        "addr": point.addr,
+        "reg": point.reg,
+        "fc": point.fc,
+        "qty": point.qty,
+        "fail_n": point.fail_n,
+        "dtype": point.dtype,
+        "scale": point.scale,
+        "unit": point.unit or "",
+        "cmp": point.cmp or "",
+        "warn": "-" if point.warn is None else point.warn,
+        "crit": "-" if point.crit is None else point.crit,
+    }
+    if include_name and (point.name or ""):
+        fields["name"] = point.name
+    return fields
+
+
 def cmd_point_set_from_point(point: Point) -> str:
-    return cmd_point_set(
-        point.tag,
-        addr=point.addr,
-        reg=point.reg,
-        fc=point.fc,
-        qty=point.qty,
-        fail_n=point.fail_n,
-        dtype=point.dtype,
-        scale=point.scale,
-        unit=point.unit or "",
-        cmp=point.cmp or "",
-        warn="-" if point.warn is None else point.warn,
-        crit="-" if point.crit is None else point.crit,
-    )
+    try:
+        return cmd_point_set(point.id, **_set_fields_from_point(point, True))
+    except ProtocolError as exc:
+        if "too_long" not in str(exc):
+            raise
+        return cmd_point_set(point.id, **_set_fields_from_point(point, False))
 
 
-def cmd_point_del(tag: str) -> str:
-    return _check_length(f"vgpoint del {_check_tag(tag)}")
+def cmd_point_set_cmds_from_point(point: Point) -> list[str]:
+    """Full set; if -N 使整行超 120 字节则拆成字段 set + name set."""
+    try:
+        return [cmd_point_set(point.id, **_set_fields_from_point(point, True))]
+    except ProtocolError as exc:
+        if "too_long" not in str(exc):
+            raise
+        cmds = [cmd_point_set(point.id, **_set_fields_from_point(point, False))]
+        if point.name:
+            cmds.append(cmd_point_set(point.id, name=point.name))
+        return cmds
 
 
-def cmd_point_test(tag: Optional[str] = None) -> str:
-    if tag:
-        return _check_length(f"vgpoint test {_check_tag(tag)}")
+def add_includes_name(add_cmd: str) -> bool:
+    return " -N " in (add_cmd or "")
+
+
+def cmd_point_del(point_id: str) -> str:
+    return _check_length(f"vgpoint del {_check_id(point_id)}")
+
+
+def cmd_point_test(point_id: Optional[str] = None) -> str:
+    if point_id:
+        return _check_length(f"vgpoint test {_check_id(point_id)}")
     return "vgpoint test"
 
 
@@ -248,11 +285,33 @@ def cmd_cat_points(path: str = POINTS_PATH) -> str:
 
 # ---- validators ----
 
+def cmd_byte_len(cmd: str) -> int:
+    return len((cmd or "").encode("utf-8"))
+
+
+def _check_id(point_id: str) -> str:
+    point_id = (point_id or "").strip()
+    if not ID_RE.match(point_id):
+        raise ProtocolError(f"invalid id {point_id!r} (need [A-Za-z0-9_]{{1,23}})")
+    return point_id
+
+
 def _check_tag(tag: str) -> str:
-    tag = (tag or "").strip()
-    if not TAG_RE.match(tag):
-        raise ProtocolError(f"invalid tag {tag!r} (need [A-Za-z0-9_]{{1,23}})")
-    return tag
+    return _check_id(tag)
+
+
+def _check_name(name: str) -> str:
+    raw = name if isinstance(name, str) else str(name)
+    if not raw:
+        raise ProtocolError("invalid name (empty)")
+    n = len(raw.encode("utf-8"))
+    if n > MAX_NAME_BYTES:
+        raise ProtocolError(f"invalid name ({n} bytes, max {MAX_NAME_BYTES})")
+    for ch in raw:
+        o = ord(ch)
+        if o < 32 or o == 127 or ch in ' ="\\':
+            raise ProtocolError(f"invalid name {raw!r} (no ASCII whitespace/=/\"/\\\\/controls)")
+    return raw
 
 
 def _check_addr(addr: int) -> int:
@@ -319,7 +378,7 @@ def _fmt_num(x: float) -> str:
 
 
 def _check_length(cmd: str) -> str:
-    n = len(cmd.encode("ascii", errors="ignore"))
+    n = cmd_byte_len(cmd)
     if n > MAX_CMD_BYTES:
         raise ProtocolError(f"command too_long ({n}>{MAX_CMD_BYTES} bytes)")
     return cmd
@@ -367,11 +426,21 @@ def parse_vgpoint_points(text: str) -> list[Point]:
     points: list[Point] = []
     for m in _POINT_RE.finditer(strip_prompt(text)):
         kv = _kv(m.group(1))
-        if "tag" not in kv:
+        pid = kv.get("id", "")
+        if not ID_RE.match(pid):
             continue
+        raw_name = kv.get("name", "")
+        if raw_name in ("", "-"):
+            name = pid
+        else:
+            try:
+                name = _check_name(raw_name)
+            except ProtocolError:
+                name = pid
         points.append(
             Point(
-                tag=kv["tag"],
+                id=pid,
+                name=name,
                 addr=int(kv.get("addr", 0)),
                 fc=int(kv.get("fc", 3)),
                 reg=int(kv.get("reg", 0)),
@@ -392,11 +461,14 @@ def parse_vgpoint_reads(text: str) -> list[VgPointRead]:
     reads: list[VgPointRead] = []
     for m in _READ_RE.finditer(strip_prompt(text)):
         kv = _kv(m.group(1))
+        pid = kv.get("id", "")
+        if not pid:
+            continue
         raw_s = kv.get("raw", "-")
         val_s = kv.get("value", "-")
         reads.append(
             VgPointRead(
-                tag=kv.get("tag", ""),
+                id=pid,
                 raw=None if raw_s == "-" else int(raw_s),
                 value=None if val_s == "-" else float(val_s),
                 ok=kv.get("ok", "0") == "1",
@@ -491,7 +563,10 @@ def _opt_num_field(v) -> Optional[float]:
     return float(v)
 
 
-def _point_from_dict(p: dict) -> Point:
+def _point_from_dict(p: dict) -> Optional[Point]:
+    pid = str(p.get("id", "") or "").strip()
+    if not ID_RE.match(pid):
+        return None
     unit = "" if _blank(p.get("unit")) else str(p.get("unit"))
     cmp = "" if _blank(p.get("cmp")) else str(p.get("cmp"))
     dtype = p.get("dtype")
@@ -500,8 +575,17 @@ def _point_from_dict(p: dict) -> Point:
     fail_n = p.get("fail_n", 3)
     if _blank(fail_n):
         fail_n = 3
+    raw_name = p.get("name")
+    if _blank(raw_name):
+        name = pid
+    else:
+        try:
+            name = _check_name(str(raw_name))
+        except ProtocolError:
+            name = pid
     return Point(
-        tag=str(p.get("tag", "") or ""),
+        id=pid,
+        name=name,
         addr=int(p.get("addr", 0) or 0),
         fc=int(p.get("fc", 3) or 3),
         reg=int(p.get("reg", 0) or 0),
@@ -546,7 +630,9 @@ def parse_point_table_json(text: str, path: str = "") -> Optional[PointTable]:
     for p in obj.get("points") or []:
         if not isinstance(p, dict):
             continue
-        table.points.append(_point_from_dict(p))
+        point = _point_from_dict(p)
+        if point is not None:
+            table.points.append(point)
     return table
 
 
@@ -557,17 +643,23 @@ def prepare_import_rows(points: list[Point]) -> list[ImportRow]:
     for i, point in enumerate(points):
         err = ""
         cmd = ""
+        set_name_cmd = ""
         if i >= MAX_POINTS:
             err = f"超过 {MAX_POINTS} 点上限"
-        elif point.tag in seen:
-            err = "文件内 tag 重复"
+        elif point.id in seen:
+            err = "文件内 id 重复"
         else:
-            seen.add(point.tag)
+            seen.add(point.id)
             try:
                 cmd = cmd_point_add_from_point(point)
+                custom_name = bool(point.name) and point.name != point.id
+                if custom_name and not add_includes_name(cmd):
+                    set_name_cmd = cmd_point_set(point.id, name=point.name)
             except (ProtocolError, ValueError, TypeError) as exc:
                 err = str(exc)
-        rows.append(ImportRow(point=point, error=err, add_cmd=cmd))
+        rows.append(
+            ImportRow(point=point, error=err, add_cmd=cmd, set_name_cmd=set_name_cmd)
+        )
     return rows
 
 

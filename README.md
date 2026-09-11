@@ -10,8 +10,9 @@
 
 - 侧栏图标：`dashboard.png` / `data.png` / `configuration.png`（`res.qrc`）
 - 点位卡片：`sensor.png`（`sourcecard_src.qrc`）
-- 流程：**新增点位 → 试读候选 → 人工确认 → 确认落盘**（`vgpoint apply --confirm`）
+- 流程：**新增 / 导入 / 删除点位 → 试读候选 → 人工确认 → 确认落盘**（`vgpoint apply --confirm`）
 - 上位机对齐说明：[`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+- 点表导入 JSON 格式：[`docs/POINT_TABLE_JSON.md`](docs/POINT_TABLE_JSON.md)，示例 [`examples/vgpoint_demo_points.json`](examples/vgpoint_demo_points.json)
 
 ## 运行
 

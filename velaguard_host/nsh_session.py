@@ -98,7 +98,7 @@ class NshSession:
         cmd = command.rstrip("\r\n")
         self._rx = ""
         self._ser.reset_input_buffer()
-        payload = (cmd + "\n").encode("ascii", errors="ignore")
+        payload = (cmd + "\n").encode("utf-8")
         try:
             self._ser.write(payload)
             self._ser.flush()

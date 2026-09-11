@@ -22,8 +22,9 @@ class ProbeBlock:
 
 @dataclass
 class Point:
-    tag: str
+    id: str
     addr: int
+    name: str = ""
     fc: int = 3
     reg: int = 0
     qty: int = 1
@@ -34,6 +35,10 @@ class Point:
     warn: Optional[float] = None
     crit: Optional[float] = None
     fail_n: int = 3
+
+    def __post_init__(self) -> None:
+        if not (self.name or "").strip():
+            self.name = self.id
 
     def scaled(self, raw: int) -> float:
         return float(raw) * float(self.scale)
@@ -78,7 +83,7 @@ class VgPointStatus:
 
 @dataclass
 class VgPointRead:
-    tag: str
+    id: str
     raw: Optional[int]
     value: Optional[float]
     ok: bool

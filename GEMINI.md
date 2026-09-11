@@ -25,4 +25,5 @@ dialog are rebuilt in `widgets/` with a VelaGuard industrial QSS theme
 - Keep the Designer shell and PNG resources; middle pages may be Python widgets.
 - `protocol.py` must track the board protocol doc; update tests when it changes.
 - `vgpoint apply --confirm` is a separate human-confirmed action after `test`.
-- Tag: `[A-Za-z0-9_]{1,23}`; command ≤ 120 bytes.
+- Point identity is `id` (`[A-Za-z0-9_]{1,23}`); `name` is display-only (UTF-8, ≤47 bytes).
+- Commands use `vgpoint add -i` / `-N`; do not send `-t`. Command ≤ 120 UTF-8 bytes.

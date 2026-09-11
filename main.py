@@ -30,8 +30,8 @@ from theme import apply_theme
 from velaguard_host import protocol
 from velaguard_host.models import Point
 from velaguard_host.worker import SerialController
-from widgets import AddPointDialog, ConsolePage, ImportPointsDialog, PointsPage, SessionPage
-from widgets.import_points_dialog import load_import_rows
+from widgets import AddPointDialog, AddPointResult, ConsolePage, ImportPointsDialog, PointsPage, SessionPage
+from widgets.import_points_dialog import load_import_rows, show_point_table_spec
 
 
 @dataclass
@@ -63,6 +63,14 @@ class _ImportJob:
     cmd: str
     kind: str = "add"
     retried_set: bool = False
+    set_name_cmd: str = ""
+
+
+@dataclass
+class _DelJob:
+    tag: str
+    cmd: str
+    kind: str = "del"  # list_c | abort | add | del
 
 
 class mainUI(QWidget, Ui_Form):
@@ -88,6 +96,20 @@ class mainUI(QWidget, Ui_Form):
         self._import_fail = 0
         self._importing = False
         self._import_current = None
+        self._del_queue: list[_DelJob] = []
+        self._del_index = 0
+        self._del_ok = 0
+        self._del_fail = 0
+        self._deleting = False
+        self._del_current: Optional[_DelJob] = None
+        self._del_targets: list[str] = []
+        self._edit_queue: list[_DelJob] = []
+        self._edit_index = 0
+        self._editing = False
+        self._edit_current: Optional[_DelJob] = None
+        self._edit_spec: Optional[AddPointResult] = None
+        self._edit_set_cmds: list[str] = []
+        self._pending_add_name_cmd = ""
         self.mainUI_custom()
 
     def mainUI_custom(self):
@@ -116,7 +138,7 @@ class mainUI(QWidget, Ui_Form):
         self.serial_port_list_init()
 
         self.update_textbrowser("[host] 协议: vgpoint NSH（板端 docs/velaguard-host-nsh-protocol.md）")
-        self.update_textbrowser("[host] 流程: 新增/删除点位 → 试读候选 → 人确认 → 确认落盘")
+        self.update_textbrowser("[host] 流程: 新增/导入/删除点位 → 试读候选 → 人确认 → 确认落盘")
         self._set_online_chips(False)
         self._refresh_session()
 
@@ -201,8 +223,14 @@ class mainUI(QWidget, Ui_Form):
         self.page_points.apply_requested.connect(self.confirm_apply)
         self.page_points.abort_requested.connect(self.abort_candidate)
         self.page_points.delete_requested.connect(self.delete_point)
+        self.page_points.batch_delete_requested.connect(self.delete_points)
+        self.page_points.edit_requested.connect(self.open_edit_dialog)
         self.page_points.import_requested.connect(self.open_import_dialog)
-        self.page_session.delete_requested.connect(self.delete_point)
+        self.page_points.format_spec_requested.connect(
+            lambda: show_point_table_spec(self)
+        )
+        self.page_session.delete_requested.connect(self.delete_points)
+        self.page_session.edit_requested.connect(self.open_edit_dialog)
         self.page_console.command_submitted.connect(self._on_console_command)
 
     def _wire_nav(self) -> None:
@@ -326,6 +354,9 @@ class mainUI(QWidget, Ui_Form):
         self._inflight = 0
         self._connected_port = ""
         self._abort_import("串口已断开")
+        self._abort_delete("串口已断开")
+        self._abort_edit("串口已断开")
+        self._pending_add_name_cmd = ""
         self._set_busy(False)
         self._set_online_chips(False)
 
@@ -339,6 +370,14 @@ class mainUI(QWidget, Ui_Form):
             self._on_import_reply(command, response)
         except Exception as exc:
             self.update_textbrowser(f"[import] {exc}")
+        try:
+            self._on_del_reply(command, response)
+        except Exception as exc:
+            self.update_textbrowser(f"[del] {exc}")
+        try:
+            self._on_edit_reply(command, response)
+        except Exception as exc:
+            self.update_textbrowser(f"[edit] {exc}")
         self._finish_inflight()
 
     def _on_nsh_failed(self, command: str, error: str) -> None:
@@ -349,6 +388,9 @@ class mainUI(QWidget, Ui_Form):
             self._connecting = False
             self._inflight = 0
             self._connected_port = ""
+            self._abort_import("连接失败")
+            self._abort_delete("连接失败")
+            self._abort_edit("连接失败")
             self._set_online_chips(False)
             self._set_busy(False)
         else:
@@ -356,6 +398,14 @@ class mainUI(QWidget, Ui_Form):
                 self._on_import_transport_fail(command, error)
             except Exception as exc:
                 self.update_textbrowser(f"[import] {exc}")
+            try:
+                self._on_del_transport_fail(command, error)
+            except Exception as exc:
+                self.update_textbrowser(f"[del] {exc}")
+            try:
+                self._on_edit_transport_fail(command, error)
+            except Exception as exc:
+                self.update_textbrowser(f"[edit] {exc}")
             self._finish_inflight()
 
     def _dispatch(self, command: str, response: str) -> None:
@@ -364,22 +414,37 @@ class mainUI(QWidget, Ui_Form):
         st = protocol.parse_vgpoint_status(response)
         points = protocol.parse_vgpoint_points(response)
         reads = protocol.parse_vgpoint_reads(response)
-        if points and command.startswith("vgpoint list"):
-            self._sync_cards_from_points(points, candidate=command.endswith("-c"))
+        if command.startswith("vgpoint list"):
+            is_cand = command.rstrip().endswith("-c")
+            if is_cand:
+                if points:
+                    self._sync_cards_from_points(points, candidate=True)
+            elif (st is not None and st.ok) or points:
+                self._replace_committed_points(points)
         if reads:
             self._apply_reads(reads)
         if st:
             kind = "OK" if st.ok else f"ERR {st.code}"
             self.update_textbrowser(f"[parse] vgpoint {kind} cmd={st.cmd} n={st.n}")
+            if st.ok and st.cmd == "add":
+                follow = self._pending_add_name_cmd
+                self._pending_add_name_cmd = ""
+                if follow:
+                    self.send_nsh(follow, kind="set", timeout_s=15)
             if st.ok and st.cmd == "apply":
-                self.update_textbrowser("[host] 已确认表已更新；请再「试读候选」或 list 核对")
-                self.all_sources = [s for s in self.all_sources if not s.pending_delete]
-                for src in self.all_sources:
-                    src.candidate = False
-                    src.was_committed = True
-                    src.pending_delete = False
-                self.page_points.mark_all_committed()
-                self._refresh_session()
+                if st.n == 0:
+                    self.update_textbrowser("[host] 已确认表已清空（n=0）")
+                    self._clear_points()
+                else:
+                    self.update_textbrowser("[host] 已确认表已更新；正在 list 核对")
+                    self.all_sources = [s for s in self.all_sources if not s.pending_delete]
+                    for src in self.all_sources:
+                        src.candidate = False
+                        src.was_committed = True
+                        src.pending_delete = False
+                    self.page_points.mark_all_committed()
+                    self._refresh_session()
+                self.send_nsh(protocol.cmd_point_list(False), kind="list", timeout_s=5)
             if st.ok and st.cmd == "del":
                 parts = command.split()
                 tag = parts[2] if len(parts) >= 3 else ""
@@ -393,11 +458,19 @@ class mainUI(QWidget, Ui_Form):
                         src.candidate = False
                 self.page_points.clear_pending_deletes()
                 self._refresh_session()
-                self.send_nsh(protocol.cmd_point_list(False), kind="list", timeout_s=5)
+                if not self._deleting and not self._editing:
+                    self.send_nsh(protocol.cmd_point_list(False), kind="list", timeout_s=5)
+            if not st.ok and st.cmd == "add":
+                self._pending_add_name_cmd = ""
             if not st.ok and st.cmd == "del":
                 self.update_textbrowser(f"[host] 删除失败 code={st.code}")
             if not st.ok and st.code == "need_confirm":
                 self.update_textbrowser("[host] apply 必须带 --confirm，已用确认对话框流程")
+            if not st.ok and st.cmd == "apply" and st.code == "no_candidate":
+                self.update_textbrowser(
+                    "[host] 落盘失败：候选文件不存在，或当前固件仍拒绝空候选。"
+                    "删光全部点后 apply 需要板端允许空候选文件写成空表；请重新编译烧录 vgpoint。"
+                )
 
     def _on_console_command(self, command: str) -> None:
         if not self._require_online():
@@ -417,9 +490,10 @@ class mainUI(QWidget, Ui_Form):
         try:
             spec = dialog.result_values()
             cmd = protocol.cmd_point_add(
-                tag=spec.tag,
+                point_id=spec.id,
                 addr=spec.addr,
                 reg=spec.reg,
+                name=spec.name,
                 fc=spec.fc,
                 qty=spec.qty,
                 dtype=spec.dtype,
@@ -429,6 +503,9 @@ class mainUI(QWidget, Ui_Form):
                 warn=spec.warn,
                 crit=spec.crit,
             )
+            name_cmd = ""
+            if spec.name and spec.name != spec.id and not protocol.add_includes_name(cmd):
+                name_cmd = protocol.cmd_point_set(spec.id, name=spec.name)
         except (ValueError, protocol.ProtocolError) as exc:
             QMessageBox.warning(self, "参数无效", str(exc))
             return
@@ -436,7 +513,7 @@ class mainUI(QWidget, Ui_Form):
         src = self._upsert_source(
             source_set(
                 name=spec.name,
-                tag=spec.tag,
+                tag=spec.id,
                 slave_addr=spec.addr,
                 function_code=spec.fc,
                 start_addr=spec.reg,
@@ -452,16 +529,244 @@ class mainUI(QWidget, Ui_Form):
             )
         )
         src.card_widget = self.page_points.upsert(
-            spec.tag, unit=spec.unit, candidate=True
+            spec.id, unit=spec.unit, candidate=True, name=spec.name
         )
         self._refresh_session()
+        self._pending_add_name_cmd = name_cmd
         self.send_nsh(cmd, kind="add", timeout_s=15)
+
+    def open_edit_dialog(self, tag: str):
+        tag = (tag or "").strip()
+        if not tag:
+            return
+        if not self._require_online():
+            return
+        busy = self._queue_busy()
+        if busy:
+            self.update_textbrowser(f"[edit] {busy}进行中，请稍后再编辑")
+            return
+        src = next((s for s in self.all_sources if s.tag == tag), None)
+        if src is None:
+            QMessageBox.information(self, "编辑点位", f"找不到点 {tag}")
+            return
+        if src.pending_delete:
+            QMessageBox.information(
+                self,
+                "编辑点位",
+                "该点已标记待删除。请先「放弃候选」撤销删除后再改。",
+            )
+            return
+        dialog = AddPointDialog(self, existing=self._spec_from_source(src))
+        if dialog.exec_() != dialog.Accepted:
+            self.update_textbrowser(f"[edit] 已取消 {tag}")
+            return
+        try:
+            spec = dialog.result_values()
+            spec.id = src.tag
+            point = self._point_from_spec(spec)
+            set_cmds = protocol.cmd_point_set_cmds_from_point(point)
+        except (ValueError, protocol.ProtocolError) as exc:
+            QMessageBox.warning(self, "参数无效", str(exc))
+            return
+        self._edit_spec = spec
+        self._edit_queue = [
+            _DelJob(tag="", cmd=protocol.cmd_point_list(True), kind="list_c")
+        ]
+        self._edit_index = 0
+        self._editing = True
+        self._edit_current = None
+        self._edit_set_cmds = set_cmds
+        self.update_textbrowser(f"[edit] {spec.id} → 候选（不会自动落盘）")
+        self._send_next_edit()
+
+    def _spec_from_source(self, src: source_set) -> AddPointResult:
+        return AddPointResult(
+            id=src.tag,
+            name=src.name or src.tag,
+            addr=int(src.slave_addr),
+            fc=int(src.function_code or 3),
+            reg=int(src.start_addr),
+            qty=int(src.data_len or 1),
+            dtype=src.data_type or "int16",
+            scale=self._point_from_source(src).scale,
+            formula=src.formula or "1",
+            unit=src.unit or "",
+            cmp=src.cmp or "",
+            warn=src.warn,
+            crit=src.crit,
+        )
+
+    def _point_from_spec(self, spec: AddPointResult) -> Point:
+        return Point(
+            id=spec.id,
+            name=spec.name,
+            addr=spec.addr,
+            fc=spec.fc,
+            reg=spec.reg,
+            qty=spec.qty,
+            dtype=spec.dtype,
+            scale=spec.scale,
+            unit=spec.unit,
+            cmp=spec.cmp,
+            warn=spec.warn,
+            crit=spec.crit,
+        )
+
+    def _send_next_edit(self) -> None:
+        if not self._editing:
+            return
+        if self._edit_index >= len(self._edit_queue):
+            self._finish_edit(ok=True)
+            return
+        job = self._edit_queue[self._edit_index]
+        self._edit_current = job
+        if job.kind == "list_c":
+            note = "查看候选表"
+        elif job.kind == "abort":
+            note = "丢掉空候选，以便从已确认表复制"
+        elif job.kind == "add":
+            note = f"补进候选 {job.tag}"
+        else:
+            note = f"set {job.tag}"
+        self.update_textbrowser(f"[edit] {note}")
+        self.send_nsh(job.cmd, kind=job.kind, timeout_s=15)
+        self.page_points.set_busy(True, note)
+
+    def _on_edit_reply(self, command: str, response: str) -> None:
+        if not self._editing or self._edit_current is None:
+            return
+        job = self._edit_current
+        if command != job.cmd:
+            return
+        st = protocol.parse_vgpoint_status(response)
+        if job.kind == "list_c":
+            if not self._plan_edit_after_probe(response):
+                self._abort_edit("无法规划编辑队列")
+                return
+        elif job.kind == "abort":
+            if not (st and st.ok):
+                code = st.code if st else "no_status"
+                self._abort_edit(f"无法准备候选表 {code}")
+                return
+        elif job.kind == "add":
+            if not (st and (st.ok or st.code == "dup_id")):
+                code = st.code if st else "no_status"
+                self._abort_edit(f"补候选失败 {job.tag} {code}")
+                return
+        elif job.kind == "set":
+            if st and st.ok:
+                self._apply_edit_local()
+            else:
+                code = st.code if st else "no_status"
+                self.update_textbrowser(f"[edit] FAIL {job.tag} {code}")
+                self._abort_edit(f"set 失败 {code}")
+                return
+        self._edit_index += 1
+        self._send_next_edit()
+
+    def _on_edit_transport_fail(self, command: str, error: str) -> None:
+        if not self._editing or self._edit_current is None:
+            return
+        job = self._edit_current
+        if command != job.cmd:
+            return
+        self._abort_edit(error)
+
+    def _plan_edit_after_probe(self, response: str) -> bool:
+        spec = self._edit_spec
+        if spec is None:
+            return False
+        cand_ids = {p.id for p in protocol.parse_vgpoint_points(response)}
+        st = protocol.parse_vgpoint_status(response)
+        cand_n = st.n if st is not None else len(cand_ids)
+        extra: list[_DelJob] = []
+        set_jobs = [
+            _DelJob(tag=spec.id, cmd=cmd, kind="set") for cmd in self._edit_set_cmds
+        ]
+        if spec.id in cand_ids:
+            extra.extend(set_jobs)
+        elif cand_n == 0:
+            self.update_textbrowser(
+                "[edit] 候选为空，先 abort 再从已确认表复制后 set"
+            )
+            extra.append(
+                _DelJob(tag="", cmd=protocol.cmd_point_abort(), kind="abort")
+            )
+            extra.extend(set_jobs)
+        else:
+            self.update_textbrowser("[edit] 候选里没有该点，先 add 再 set")
+            wanted = spec.id
+            for src in self.all_sources:
+                if src.tag in cand_ids or src.pending_delete:
+                    continue
+                if src.was_committed or src.tag == wanted:
+                    job = self._make_add_job(src)
+                    if job is None:
+                        return False
+                    extra.append(job)
+            extra.extend(set_jobs)
+        if not extra:
+            return False
+        self._edit_queue.extend(extra)
+        return True
+
+    def _apply_edit_local(self) -> None:
+        spec = self._edit_spec
+        if spec is None:
+            return
+        old = next((s for s in self.all_sources if s.tag == spec.id), None)
+        was_committed = bool(old.was_committed) if old else False
+        src = self._upsert_source(
+            source_set(
+                name=spec.name,
+                tag=spec.id,
+                slave_addr=spec.addr,
+                function_code=spec.fc,
+                start_addr=spec.reg,
+                data_len=spec.qty,
+                data_type=spec.dtype,
+                formula=spec.formula,
+                unit=spec.unit,
+                candidate=True,
+                was_committed=was_committed,
+                cmp=spec.cmp,
+                warn=spec.warn,
+                crit=spec.crit,
+            )
+        )
+        src.card_widget = self.page_points.upsert(
+            spec.id, unit=spec.unit, candidate=True, name=spec.name
+        )
+        self._refresh_session()
+
+    def _finish_edit(self, ok: bool) -> None:
+        tag = self._edit_spec.id if self._edit_spec else ""
+        self._editing = False
+        self._edit_current = None
+        self._edit_queue = []
+        self._edit_spec = None
+        self._edit_set_cmds = []
+        if ok:
+            self.update_textbrowser(
+                f"[edit] 已写入候选 {tag}。请「试读候选」后再「确认落盘」。"
+            )
+
+    def _abort_edit(self, reason: str) -> None:
+        if not self._editing:
+            return
+        self.update_textbrowser(f"[edit] 中止：{reason}")
+        self._editing = False
+        self._edit_current = None
+        self._edit_queue = []
+        self._edit_spec = None
+        self._edit_set_cmds = []
 
     def open_import_dialog(self):
         if not self._require_online():
             return
-        if self._importing:
-            self.update_textbrowser("[import] 已有导入进行中")
+        busy = self._queue_busy()
+        if busy:
+            self.update_textbrowser(f"[import] {busy}进行中，请稍后再导入")
             return
         start = Path(__file__).resolve().parent / "examples"
         if not start.is_dir():
@@ -483,7 +788,12 @@ class mainUI(QWidget, Ui_Form):
             self.update_textbrowser("[import] 已取消")
             return
         self._import_queue = [
-            _ImportJob(point=row.point, cmd=row.add_cmd, kind="add")
+            _ImportJob(
+                point=row.point,
+                cmd=row.add_cmd,
+                kind="add",
+                set_name_cmd=row.set_name_cmd,
+            )
             for row in rows
             if row.ok and row.add_cmd
         ]
@@ -510,11 +820,11 @@ class mainUI(QWidget, Ui_Form):
         self._import_current = job
         n = len(self._import_queue)
         self.update_textbrowser(
-            f"[import] {self._import_index + 1}/{n} {job.kind} {job.point.tag}"
+            f"[import] {self._import_index + 1}/{n} {job.kind} {job.point.id}"
         )
         self.send_nsh(job.cmd, kind="import", timeout_s=15)
         self.page_points.set_busy(
-            True, f"导入中 {self._import_index + 1}/{n} {job.point.tag}"
+            True, f"导入中 {self._import_index + 1}/{n} {job.point.id}"
         )
 
     def _on_import_reply(self, command: str, response: str) -> None:
@@ -527,23 +837,30 @@ class mainUI(QWidget, Ui_Form):
         if (
             st
             and not st.ok
-            and st.code == "dup_tag"
+            and st.code == "dup_id"
             and job.kind == "add"
             and not job.retried_set
         ):
             job.retried_set = True
             job.kind = "set"
             job.cmd = protocol.cmd_point_set_from_point(job.point)
-            self.update_textbrowser(f"[import] {job.point.tag} 已存在，改 set")
+            self.update_textbrowser(f"[import] {job.point.id} 已存在，改 set")
             self.send_nsh(job.cmd, kind="import", timeout_s=15)
             return
         if st and st.ok:
+            if job.set_name_cmd and job.kind != "set_name":
+                job.kind = "set_name"
+                job.cmd = job.set_name_cmd
+                job.set_name_cmd = ""
+                self.update_textbrowser(f"[import] {job.point.id} 补写 name")
+                self.send_nsh(job.cmd, kind="import", timeout_s=15)
+                return
             self._import_ok += 1
             self._upsert_imported_point(job.point)
         else:
             self._import_fail += 1
             code = st.code if st else "no_status"
-            self.update_textbrowser(f"[import] FAIL {job.point.tag} {code}")
+            self.update_textbrowser(f"[import] FAIL {job.point.id} {code}")
         self._import_index += 1
         self._send_next_import()
 
@@ -554,15 +871,15 @@ class mainUI(QWidget, Ui_Form):
         if command != job.cmd:
             return
         self._import_fail += 1
-        self.update_textbrowser(f"[import] FAIL {job.point.tag} {error}")
+        self.update_textbrowser(f"[import] FAIL {job.point.id} {error}")
         self._import_index += 1
         self._send_next_import()
 
     def _upsert_imported_point(self, point: Point) -> None:
         src = self._upsert_source(
             source_set(
-                name=point.tag,
-                tag=point.tag,
+                name=point.name or point.id,
+                tag=point.id,
                 slave_addr=point.addr,
                 function_code=point.fc,
                 start_addr=point.reg,
@@ -577,7 +894,7 @@ class mainUI(QWidget, Ui_Form):
             )
         )
         src.card_widget = self.page_points.upsert(
-            point.tag, unit=point.unit, candidate=True
+            point.id, unit=point.unit, candidate=True, name=point.name or point.id
         )
         self._refresh_session()
 
@@ -601,6 +918,15 @@ class mainUI(QWidget, Ui_Form):
         self._import_current = None
         self._import_queue = []
 
+    def _queue_busy(self) -> str:
+        if self._importing:
+            return "导入"
+        if self._deleting:
+            return "删除"
+        if self._editing:
+            return "编辑"
+        return ""
+
     def run_point_test(self):
         if not self._require_online():
             return
@@ -610,11 +936,21 @@ class mainUI(QWidget, Ui_Form):
     def confirm_apply(self):
         if not self._require_online():
             return
+        pending = [s.tag for s in self.all_sources if s.pending_delete]
+        remain = [
+            s.tag
+            for s in self.all_sources
+            if not s.pending_delete
+        ]
+        extra = ""
+        if pending and not remain:
+            extra = "\n\n当前候选会被写成空表，已确认表将清空（首页无点）。"
         ret = QMessageBox.question(
             self,
             "确认落盘",
             "将执行：\n\n  vgpoint apply --confirm\n\n"
-            "把候选表写入已确认点表并刷新采集。\n确定？",
+            "把候选表写入已确认点表并刷新采集。"
+            f"{extra}\n确定？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -638,29 +974,253 @@ class mainUI(QWidget, Ui_Form):
         self.send_nsh(protocol.cmd_point_abort(), kind="abort", timeout_s=15)
 
     def delete_point(self, tag: str) -> None:
-        tag = (tag or "").strip()
-        if not tag:
+        self.delete_points([tag])
+
+    def delete_points(self, tags) -> None:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for raw in tags or []:
+            tag = (raw or "").strip()
+            if not tag or tag in seen:
+                continue
+            seen.add(tag)
+            unique.append(tag)
+        if not unique:
+            QMessageBox.information(
+                self,
+                "批量删除",
+                "请先勾选实时数据卡片，或在参数设置点表中多选行。",
+            )
             return
         if not self._require_online():
             return
+        busy = self._queue_busy()
+        if busy:
+            self.update_textbrowser(f"[del] {busy}进行中，请稍后再删除")
+            return
+        preview = "\n".join(f"  vgpoint del {tag}" for tag in unique[:12])
+        extra = "" if len(unique) <= 12 else f"\n  … 共 {len(unique)} 个"
+        remain = [
+            s.tag
+            for s in self.all_sources
+            if s.tag not in unique and not s.pending_delete
+        ]
+        empty_note = ""
+        if not remain:
+            empty_note = (
+                "\n\n删光后候选为空。确认落盘会把已确认表写成空表（首页无点）。"
+            )
         ret = QMessageBox.question(
             self,
             "删除点位",
-            f"将执行：\n\n  vgpoint del {tag}\n\n"
-            "只从候选表删除。已确认表要等「确认落盘」才会少这个点。\n"
-            "「放弃候选」可撤销未落盘的删除。\n确定？",
+            "将从候选表删除：\n\n"
+            f"{preview}{extra}\n\n"
+            "已确认点若还不在候选里，会先同步进候选再删。\n"
+            "已确认表要等「确认落盘」才会少这些点。\n"
+            "「放弃候选」可撤销未落盘的删除。"
+            f"{empty_note}\n确定？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
-            self.update_textbrowser(f"[host] 已取消删除 {tag}")
+            shown = unique[0] if len(unique) == 1 else f"{len(unique)} 点"
+            self.update_textbrowser(f"[host] 已取消删除 {shown}")
             return
+        self.page_points.clear_selection(unique)
+        self._del_targets = unique
+        self._del_queue = [
+            _DelJob(tag="", cmd=protocol.cmd_point_list(True), kind="list_c")
+        ]
+        self._del_index = 0
+        self._del_ok = 0
+        self._del_fail = 0
+        self._deleting = True
+        self._del_current = None
+        self.update_textbrowser(
+            f"[del] 开始删除 {len(unique)} 点 → 候选（不会自动落盘）"
+        )
+        self._send_next_del()
+
+    def _send_next_del(self) -> None:
+        if not self._deleting:
+            return
+        if self._del_index >= len(self._del_queue):
+            self._finish_delete()
+            return
+        job = self._del_queue[self._del_index]
+        self._del_current = job
+        n_del = sum(1 for j in self._del_queue if j.kind == "del")
+        i_del = sum(1 for j in self._del_queue[: self._del_index] if j.kind == "del")
+        if job.kind == "list_c":
+            note = "查看候选表"
+        elif job.kind == "abort":
+            note = "丢掉空候选，以便从已确认表复制"
+        elif job.kind == "add":
+            note = f"补进候选 {job.tag}"
+        else:
+            note = f"{i_del + 1}/{n_del} {job.tag}"
+        self.update_textbrowser(f"[del] {note}")
+        self.send_nsh(job.cmd, kind=job.kind, timeout_s=15)
+        self.page_points.set_busy(True, note)
+
+    def _on_del_reply(self, command: str, response: str) -> None:
+        if not self._deleting or self._del_current is None:
+            return
+        job = self._del_current
+        if command != job.cmd:
+            return
+        st = protocol.parse_vgpoint_status(response)
+        if job.kind == "list_c":
+            if not self._plan_delete_after_probe(response):
+                self._abort_delete("无法规划删除队列")
+                return
+        elif job.kind == "abort":
+            if not (st and st.ok):
+                code = st.code if st else "no_status"
+                self._abort_delete(f"无法准备候选表 {code}")
+                return
+        elif job.kind == "add":
+            if not (st and (st.ok or st.code == "dup_id")):
+                self._del_fail += 1
+                code = st.code if st else "no_status"
+                self.update_textbrowser(f"[del] 补候选 FAIL {job.tag} {code}")
+            else:
+                src = next((s for s in self.all_sources if s.tag == job.tag), None)
+                if src is not None:
+                    src.candidate = True
+                    self.page_points.upsert(
+                        src.tag, unit=src.unit, candidate=True, name=src.name or src.tag
+                    )
+        elif job.kind == "del":
+            if st and st.ok:
+                self._del_ok += 1
+            else:
+                self._del_fail += 1
+                code = st.code if st else "no_status"
+                self.update_textbrowser(f"[del] FAIL {job.tag} {code}")
+        self._del_index += 1
+        self._send_next_del()
+
+    def _on_del_transport_fail(self, command: str, error: str) -> None:
+        if not self._deleting or self._del_current is None:
+            return
+        job = self._del_current
+        if command != job.cmd:
+            return
+        if job.kind in ("list_c", "abort"):
+            self._abort_delete(error)
+            return
+        self._del_fail += 1
+        self.update_textbrowser(f"[del] FAIL {job.tag or job.kind} {error}")
+        self._del_index += 1
+        self._send_next_del()
+
+    def _make_del_jobs(self, tags: list[str]) -> Optional[list[_DelJob]]:
+        jobs: list[_DelJob] = []
+        for tag in tags:
+            try:
+                jobs.append(_DelJob(tag=tag, cmd=protocol.cmd_point_del(tag), kind="del"))
+            except protocol.ProtocolError as exc:
+                QMessageBox.warning(self, "参数无效", f"{tag}: {exc}")
+                return None
+        return jobs
+
+    def _make_add_job(self, src: source_set) -> Optional[_DelJob]:
         try:
-            cmd = protocol.cmd_point_del(tag)
-        except protocol.ProtocolError as exc:
-            QMessageBox.warning(self, "参数无效", str(exc))
+            point = self._point_from_source(src)
+            return _DelJob(
+                tag=src.tag,
+                cmd=protocol.cmd_point_add_from_point(point),
+                kind="add",
+            )
+        except (protocol.ProtocolError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "参数无效", f"{src.tag}: {exc}")
+            return None
+
+    def _plan_delete_after_probe(self, response: str) -> bool:
+        targets = list(self._del_targets)
+        cand_tags = {p.id for p in protocol.parse_vgpoint_points(response)}
+        st = protocol.parse_vgpoint_status(response)
+        cand_n = st.n if st is not None else len(cand_tags)
+        extra: list[_DelJob] = []
+        if targets and all(tag in cand_tags for tag in targets):
+            extra = self._make_del_jobs(targets) or []
+            if len(extra) != len(targets):
+                return False
+        elif cand_n == 0:
+            self.update_textbrowser(
+                "[del] 候选为空，先 abort 再从已确认表复制后删除"
+            )
+            extra.append(
+                _DelJob(tag="", cmd=protocol.cmd_point_abort(), kind="abort")
+            )
+            dels = self._make_del_jobs(targets)
+            if dels is None:
+                return False
+            extra.extend(dels)
+        else:
+            self.update_textbrowser(
+                "[del] 候选里缺已确认点，先 add 补齐再删，避免落盘时误删其它点"
+            )
+            wanted = set(targets)
+            for src in self.all_sources:
+                if src.tag in cand_tags or src.pending_delete:
+                    continue
+                if src.was_committed or src.tag in wanted:
+                    job = self._make_add_job(src)
+                    if job is None:
+                        return False
+                    extra.append(job)
+            dels = self._make_del_jobs(targets)
+            if dels is None:
+                return False
+            extra.extend(dels)
+        if not extra:
+            return False
+        self._del_queue.extend(extra)
+        return True
+
+    def _point_from_source(self, src: source_set) -> Point:
+        try:
+            scale = float(src.formula) if src.formula else 1.0
+        except (TypeError, ValueError):
+            scale = 1.0
+        return Point(
+            id=src.tag,
+            name=src.name or src.tag,
+            addr=int(src.slave_addr),
+            fc=int(src.function_code or 3),
+            reg=int(src.start_addr),
+            qty=int(src.data_len or 1),
+            dtype=src.data_type or "int16",
+            scale=scale,
+            unit=src.unit or "",
+            cmp=src.cmp or "",
+            warn=src.warn,
+            crit=src.crit,
+        )
+
+    def _finish_delete(self) -> None:
+        total = sum(1 for j in self._del_queue if j.kind == "del")
+        ok_n = self._del_ok
+        fail_n = self._del_fail
+        self._deleting = False
+        self._del_current = None
+        self._del_queue = []
+        self._del_targets = []
+        self.update_textbrowser(
+            f"[del] 完成 ok={ok_n} fail={fail_n} / {total}。"
+            "已确认点需「确认落盘」后才会从已确认表去掉。"
+        )
+
+    def _abort_delete(self, reason: str) -> None:
+        if not self._deleting:
             return
-        self.send_nsh(cmd, kind="del", timeout_s=15)
+        self.update_textbrowser(f"[del] 中止：{reason}")
+        self._deleting = False
+        self._del_current = None
+        self._del_queue = []
+        self._del_targets = []
 
     def _mark_deleted(self, tag: str) -> None:
         src = next((s for s in self.all_sources if s.tag == tag), None)
@@ -675,6 +1235,29 @@ class mainUI(QWidget, Ui_Form):
             src.pending_delete = True
             src.candidate = True
             self.page_points.mark_pending_delete(tag)
+        self._refresh_session()
+
+    def _clear_points(self) -> None:
+        self.all_sources = []
+        self.page_points.remove_tags(list(self.page_points.tags()))
+        self._refresh_session()
+
+    def _replace_committed_points(self, points: list[Point]) -> None:
+        listed = {p.id for p in points}
+        stale: list[str] = []
+        kept: list[source_set] = []
+        for src in self.all_sources:
+            if src.tag in listed:
+                src.pending_delete = False
+                kept.append(src)
+            elif src.candidate and not src.was_committed and not src.pending_delete:
+                kept.append(src)
+            else:
+                stale.append(src.tag)
+        self.all_sources = kept
+        if stale:
+            self.page_points.remove_tags(stale)
+        self._sync_cards_from_points(points, candidate=False)
         self._refresh_session()
 
     def _upsert_source(self, src: source_set) -> source_set:
@@ -699,8 +1282,8 @@ class mainUI(QWidget, Ui_Form):
         for p in points:
             src = self._upsert_source(
                 source_set(
-                    name=p.tag,
-                    tag=p.tag,
+                    name=p.name or p.id,
+                    tag=p.id,
                     slave_addr=p.addr,
                     function_code=p.fc,
                     start_addr=p.reg,
@@ -716,20 +1299,21 @@ class mainUI(QWidget, Ui_Form):
                 )
             )
             src.card_widget = self.page_points.upsert(
-                p.tag,
+                p.id,
                 unit=p.unit,
                 candidate=src.candidate,
                 value=src.last_value,
                 ok=src.last_ok,
+                name=p.name or p.id,
             )
             if src.pending_delete:
-                self.page_points.mark_pending_delete(p.tag)
+                self.page_points.mark_pending_delete(p.id)
         self._refresh_session()
 
     def _apply_reads(self, reads) -> None:
-        by_tag = {r.tag: r for r in reads}
+        by_id = {r.id: r for r in reads}
         for src in self.all_sources:
-            r = by_tag.get(src.tag or src.name)
+            r = by_id.get(src.tag or src.name)
             if r is None:
                 continue
             if not r.ok or r.value is None:
@@ -756,6 +1340,7 @@ class mainUI(QWidget, Ui_Form):
             rows.append(
                 (
                     s.tag,
+                    s.name or s.tag,
                     s.slave_addr,
                     s.function_code,
                     s.start_addr,

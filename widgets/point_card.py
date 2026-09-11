@@ -6,7 +6,15 @@ from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 import sourcecard_src_rc  # noqa: F401
 
@@ -19,12 +27,21 @@ def _polish(widget) -> None:
 
 class PointCard(QFrame):
     delete_requested = pyqtSignal(str)
+    edit_requested = pyqtSignal(str)
 
-    def __init__(self, tag: str, unit: str = "", candidate: bool = False, parent=None):
+    def __init__(
+        self,
+        tag: str,
+        unit: str = "",
+        candidate: bool = False,
+        name: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("PointCard")
         self.setProperty("status", "idle")
         self.tag = tag
+        self.name = name or tag
         self.unit = unit or ""
         self.candidate = candidate
         self.pending_delete = False
@@ -40,25 +57,38 @@ class PointCard(QFrame):
 
         top = QHBoxLayout()
         top.setSpacing(8)
+        self.check = QCheckBox()
+        self.check.setObjectName("CardSelect")
+        self.check.setCursor(Qt.PointingHandCursor)
+        self.check.setToolTip("勾选后可批量删除")
         icon = QLabel()
         pix = QPixmap(":/新前缀/sensor.png")
         if not pix.isNull():
             icon.setPixmap(pix.scaled(22, 22, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         icon.setFixedSize(22, 22)
-        self.tag_label = QLabel(tag)
+        self.tag_label = QLabel(self.name)
         self.tag_label.setObjectName("CardTag")
+        self.tag_label.setToolTip(f"id={tag}" if self.name != tag else "")
         self.badge = QLabel("候选" if candidate else "")
         self.badge.setObjectName("CardBadge")
         self.badge.setVisible(candidate)
+        self.btn_edit = QPushButton("✎")
+        self.btn_edit.setObjectName("CardEdit")
+        self.btn_edit.setFixedSize(22, 22)
+        self.btn_edit.setCursor(Qt.PointingHandCursor)
+        self.btn_edit.setToolTip("编辑点位，写入候选表")
+        self.btn_edit.clicked.connect(lambda: self.edit_requested.emit(self.tag))
         self.btn_del = QPushButton("×")
         self.btn_del.setObjectName("CardDelete")
         self.btn_del.setFixedSize(22, 22)
         self.btn_del.setCursor(Qt.PointingHandCursor)
         self.btn_del.setToolTip("从候选表删除，落盘后才从已确认表去掉")
         self.btn_del.clicked.connect(lambda: self.delete_requested.emit(self.tag))
+        top.addWidget(self.check)
         top.addWidget(icon)
         top.addWidget(self.tag_label, 1)
         top.addWidget(self.badge)
+        top.addWidget(self.btn_edit)
         top.addWidget(self.btn_del)
         root.addLayout(top)
 
@@ -72,10 +102,17 @@ class PointCard(QFrame):
         root.addWidget(self.unit_label)
         root.addStretch(1)
 
-    def set_meta(self, tag: str, unit: str, candidate: bool) -> None:
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        if not self.pending_delete:
+            self.edit_requested.emit(self.tag)
+        super().mouseDoubleClickEvent(event)
+
+    def set_meta(self, tag: str, unit: str, candidate: bool, name: str = "") -> None:
         self.tag = tag
+        self.name = name or tag
         self.unit = unit or ""
-        self.tag_label.setText(tag)
+        self.tag_label.setText(self.name)
+        self.tag_label.setToolTip(f"id={tag}" if self.name != tag else "")
         self.unit_label.setText(self.unit)
         self.set_candidate(candidate)
 
@@ -101,7 +138,20 @@ class PointCard(QFrame):
                 self.value_label.setStyleSheet("color: #E03131;")
             else:
                 self.value_label.setStyleSheet("")
+        self.check.setEnabled(not pending)
+        if pending:
+            self.check.setChecked(False)
+        self.btn_edit.setEnabled(not pending)
         _polish(self)
+
+    def is_selected(self) -> bool:
+        return self.check.isChecked()
+
+    def set_selected(self, selected: bool) -> None:
+        if self.pending_delete:
+            self.check.setChecked(False)
+            return
+        self.check.setChecked(bool(selected))
 
     def set_value_text(self, text: str, ok: Optional[bool] = None) -> None:
         self.value_label.setText(text if text else "--")

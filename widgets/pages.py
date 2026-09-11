@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QFrame,
     QGridLayout,
@@ -58,7 +59,10 @@ class PointsPage(QWidget):
     apply_requested = pyqtSignal()
     abort_requested = pyqtSignal()
     delete_requested = pyqtSignal(str)
+    batch_delete_requested = pyqtSignal(list)
+    edit_requested = pyqtSignal(str)
     import_requested = pyqtSignal()
+    format_spec_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,7 +79,7 @@ class PointsPage(QWidget):
         head = QHBoxLayout()
         title = QLabel("实时数据")
         title.setObjectName("PageTitle")
-        hint = QLabel("新增 / 删除 → 试读候选 → 确认落盘")
+        hint = QLabel("新增 / 导入 / 编辑 / 删除 → 试读候选 → 确认落盘")
         hint.setObjectName("PageHint")
         head.addWidget(title)
         head.addSpacing(12)
@@ -118,6 +122,18 @@ class PointsPage(QWidget):
             chips.addWidget(btn)
         self._chip_btns["all"].setChecked(True)
         chips.addStretch(1)
+        self.btn_select_all = _kind(QPushButton("全选可见"), "ghost")
+        self.btn_batch_del = _kind(QPushButton("批量删除"), "ghost")
+        self.btn_format = _kind(QPushButton("点表格式"), "ghost")
+        self.btn_select_all.setToolTip("勾选当前筛选下的点位；再点一次取消")
+        self.btn_batch_del.setToolTip("对勾选点位逐条 vgpoint del，不自动落盘")
+        self.btn_format.setToolTip("查看导入 JSON 格式规范")
+        self.btn_select_all.clicked.connect(self._toggle_select_visible)
+        self.btn_batch_del.clicked.connect(self._emit_batch_delete)
+        self.btn_format.clicked.connect(self.format_spec_requested.emit)
+        chips.addWidget(self.btn_select_all)
+        chips.addWidget(self.btn_batch_del)
+        chips.addWidget(self.btn_format)
         root.addLayout(chips)
 
         self.empty = QLabel("打开串口后会列出点表\n也可「新增点位」写入候选")
@@ -167,21 +183,24 @@ class PointsPage(QWidget):
         candidate: bool = False,
         value: Optional[str] = None,
         ok: Optional[bool] = None,
+        name: str = "",
     ) -> PointCard:
         meta = self._meta.get(tag, {})
-        meta.update({"unit": unit, "candidate": candidate})
+        meta.update({"unit": unit, "candidate": candidate, "name": name or tag})
         if value is not None:
             meta["value"] = value
         if ok is not None:
             meta["ok"] = ok
         self._meta[tag] = meta
         card = self._cards.get(tag)
+        display = name or meta.get("name") or tag
         if card is None:
-            card = PointCard(tag, unit=unit, candidate=candidate)
+            card = PointCard(tag, unit=unit, candidate=candidate, name=display)
             card.delete_requested.connect(self.delete_requested.emit)
+            card.edit_requested.connect(self.edit_requested.emit)
             self._cards[tag] = card
         else:
-            card.set_meta(tag, unit, candidate)
+            card.set_meta(tag, unit, candidate, name=display)
         if value is not None:
             card.set_value_text(value, ok)
         self._relayout()
@@ -287,9 +306,42 @@ class PointsPage(QWidget):
     def tags(self) -> Iterable[str]:
         return self._cards.keys()
 
+    def selected_tags(self) -> list[str]:
+        tags = []
+        for tag in self._visible_tags():
+            card = self._cards[tag]
+            if card.pending_delete:
+                continue
+            if card.is_selected():
+                tags.append(tag)
+        return tags
+
+    def clear_selection(self, tags: Optional[Iterable[str]] = None) -> None:
+        targets = list(tags) if tags is not None else list(self._cards)
+        for tag in targets:
+            card = self._cards.get(tag)
+            if card is not None:
+                card.set_selected(False)
+
+    def _toggle_select_visible(self) -> None:
+        tags = [
+            tag
+            for tag in self._visible_tags()
+            if not self._cards[tag].pending_delete
+        ]
+        if not tags:
+            return
+        all_on = all(self._cards[tag].is_selected() for tag in tags)
+        for tag in tags:
+            self._cards[tag].set_selected(not all_on)
+
+    def _emit_batch_delete(self) -> None:
+        self.batch_delete_requested.emit(self.selected_tags())
+
 
 class SessionPage(QWidget):
-    delete_requested = pyqtSignal(str)
+    delete_requested = pyqtSignal(list)
+    edit_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -301,8 +353,12 @@ class SessionPage(QWidget):
         root.setSpacing(12)
         title = QLabel("参数设置")
         title.setObjectName("PageTitle")
-        hint = QLabel("会话只读信息 · 点表由 vgpoint 同步。删除只改候选，需确认落盘才从已确认表去掉。")
+        hint = QLabel(
+            "会话信息 · 点表可编辑或 Ctrl/Shift 多选删除。"
+            "编辑/删除只改候选，需确认落盘才写入已确认表。"
+        )
         hint.setObjectName("PageHint")
+        hint.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(hint)
 
@@ -333,27 +389,36 @@ class SessionPage(QWidget):
         table_head = QHBoxLayout()
         table_lab = QLabel("点表")
         table_lab.setObjectName("PageHint")
+        self.btn_edit_row = _kind(QPushButton("编辑选中"), "ghost")
+        self.btn_edit_row.setToolTip("编辑当前行，字段与新增相同（id 不能改，name 可改）")
+        self.btn_edit_row.clicked.connect(self._emit_selected_edit)
         self.btn_del_row = _kind(QPushButton("删除选中"), "ghost")
+        self.btn_del_row.setToolTip("删除选中的一行或多行；只改候选，不自动落盘")
         self.btn_del_row.clicked.connect(self._emit_selected_delete)
         table_head.addWidget(table_lab)
         table_head.addStretch(1)
+        table_head.addWidget(self.btn_edit_row)
         table_head.addWidget(self.btn_del_row)
         root.addLayout(table_head)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["tag", "addr", "fc", "reg", "qty", "scale", "unit", "状态"]
+            ["id", "name", "addr", "fc", "reg", "qty", "scale", "unit", "状态"]
         )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.cellDoubleClicked.connect(lambda row, _col: self._edit_row(row))
         root.addWidget(self.table, 1)
 
-    def _emit_selected_delete(self) -> None:
-        row = self.table.currentRow()
+    def _emit_selected_edit(self) -> None:
+        self._edit_row(self.table.currentRow())
+
+    def _edit_row(self, row: int) -> None:
         if row < 0:
             return
         item = self.table.item(row, 0)
@@ -361,7 +426,22 @@ class SessionPage(QWidget):
             return
         tag = item.text().strip()
         if tag:
-            self.delete_requested.emit(tag)
+            self.edit_requested.emit(tag)
+
+    def _emit_selected_delete(self) -> None:
+        tags: list[str] = []
+        seen: set[str] = set()
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
+        for row in rows:
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+            tag = item.text().strip()
+            if tag and tag not in seen:
+                seen.add(tag)
+                tags.append(tag)
+        if tags:
+            self.delete_requested.emit(tags)
 
     def set_port(self, port: str, online: bool) -> None:
         if online and port:
