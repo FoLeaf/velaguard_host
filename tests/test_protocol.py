@@ -69,6 +69,7 @@ def test_cmd_point_list_and_abort():
     assert protocol.cmd_point_list() == "vgpoint list"
     assert protocol.cmd_point_list(True) == "vgpoint list -c"
     assert protocol.cmd_point_abort() == "vgpoint abort"
+    assert protocol.cmd_point_del("temp") == "vgpoint del temp"
     assert protocol.cmd_point_test() == "vgpoint test"
     assert protocol.cmd_point_test("temp") == "vgpoint test temp"
 
@@ -82,3 +83,64 @@ def test_command_ack_ok_vgpoint():
         "vgpoint apply",
         "vgpoint: ERR cmd=apply code=need_confirm msg=missing\n",
     )
+
+
+def test_has_prompt_strips_nuttx_ansi():
+    raw = "vgpoint: OK cmd=list table=committed n=5\nnsh> \x1b[K"
+    assert not protocol.PROMPT_RE.search(raw)
+    assert protocol.has_prompt(raw)
+    body = protocol.strip_prompt(raw)
+    assert "nsh>" not in body
+    assert "\x1b" not in body
+    st = protocol.parse_vgpoint_status(raw)
+    assert st and st.ok and st.n == 5
+
+
+def test_parse_point_table_json_object_and_array():
+    obj = """{"schema_version":1,"bus":{"device":"/dev/rs485","baud":9600},"points":[
+      {"tag":"temp","addr":1,"fc":3,"reg":0,"qty":1,"dtype":"int16","scale":0.1,"unit":"C","cmp":"ge","warn":40,"crit":55,"fail_n":3},
+      {"tag":"flood","addr":2,"fc":3,"reg":2,"qty":1,"dtype":"uint16","scale":1,"unit":"-","cmp":"eq","warn":"-","crit":1}
+    ]}"""
+    table = protocol.parse_point_table_json(obj)
+    assert table is not None and len(table.points) == 2
+    assert table.points[0].tag == "temp"
+    assert table.points[0].warn == 40
+    assert table.points[1].unit == ""
+    assert table.points[1].warn is None
+    assert table.points[1].crit == 1
+
+    arr = '[{"tag":"temp","addr":1,"reg":0}]'
+    table2 = protocol.parse_point_table_json(arr)
+    assert table2 is not None and table2.points[0].fc == 3
+    assert table2.points[0].dtype == "int16"
+
+    cmd = protocol.cmd_point_add_from_point(table.points[0])
+    assert cmd.startswith("vgpoint add -t temp -a 1 -r 0")
+    set_cmd = protocol.cmd_point_set_from_point(table.points[1])
+    assert set_cmd.startswith("vgpoint set flood")
+
+
+def test_prepare_import_rows_rejects_dup_and_cap():
+    p = protocol.Point(tag="temp", addr=1, reg=0)
+    rows = protocol.prepare_import_rows([p, p])
+    assert rows[0].ok and not rows[1].ok
+    assert "重复" in rows[1].error
+
+    too_many = [protocol.Point(tag=f"t{i}", addr=1, reg=i) for i in range(protocol.MAX_POINTS + 1)]
+    rows = protocol.prepare_import_rows(too_many)
+    assert rows[-1].error.startswith("超过")
+    assert all(r.ok for r in rows[:-1])
+
+    bad = protocol.prepare_import_rows([protocol.Point(tag="bad tag", addr=1, reg=0)])
+    assert not bad[0].ok
+
+
+def test_example_demo_json_prepares():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "examples" / "vgpoint_demo_points.json"
+    table = protocol.parse_point_table_json(path.read_text(encoding="utf-8"), path=str(path))
+    assert table is not None
+    rows = protocol.prepare_import_rows(table.points)
+    assert len(rows) == 2 and all(r.ok for r in rows)
+    assert rows[0].add_cmd.startswith("vgpoint add -t temp")

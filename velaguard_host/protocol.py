@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 from .models import (
@@ -24,12 +25,15 @@ from .models import (
 )
 
 PROMPT_RE = re.compile(r"(?:nsh>|vela>)\s*$", re.MULTILINE)
+# NuttX readline often appends CSI erase: "nsh> \x1b[K"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 # Official primary apply
 SAFE_APPLY_CMD = "vgpoint apply --confirm"
 CANDIDATE_PATH = "/data/velaguard/discover/point_table_candidate.json"
 POINTS_PATH = "/data/velaguard/config/points.json"
 MAX_CMD_BYTES = 120
+MAX_POINTS = 32
 TAG_RE = re.compile(r"^[A-Za-z0-9_]{1,23}$")
 CMP_VALUES = ("ge", "le", "eq")
 
@@ -45,6 +49,17 @@ _READ_RE = re.compile(r"^vgpoint:\s+READ\s+(.*)$", re.MULTILINE)
 
 class ProtocolError(ValueError):
     pass
+
+
+@dataclass
+class ImportRow:
+    point: Point
+    error: str = ""
+    add_cmd: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
 
 
 def cmd_help() -> str:
@@ -152,6 +167,40 @@ def cmd_point_set(tag: str, **fields) -> str:
         elif c is not None:
             parts += ["-C", _fmt_num(float(c))]
     return _check_length(" ".join(parts))
+
+
+def cmd_point_add_from_point(point: Point) -> str:
+    return cmd_point_add(
+        tag=point.tag,
+        addr=point.addr,
+        reg=point.reg,
+        fc=point.fc,
+        qty=point.qty,
+        dtype=point.dtype,
+        scale=point.scale,
+        unit=point.unit,
+        cmp=point.cmp,
+        warn=point.warn,
+        crit=point.crit,
+        fail_n=point.fail_n,
+    )
+
+
+def cmd_point_set_from_point(point: Point) -> str:
+    return cmd_point_set(
+        point.tag,
+        addr=point.addr,
+        reg=point.reg,
+        fc=point.fc,
+        qty=point.qty,
+        fail_n=point.fail_n,
+        dtype=point.dtype,
+        scale=point.scale,
+        unit=point.unit or "",
+        cmp=point.cmp or "",
+        warn="-" if point.warn is None else point.warn,
+        crit="-" if point.crit is None else point.crit,
+    )
 
 
 def cmd_point_del(tag: str) -> str:
@@ -278,8 +327,17 @@ def _check_length(cmd: str) -> str:
 
 # ---- parsers ----
 
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text or "")
+
+
+def has_prompt(text: str) -> bool:
+    """True when NSH is idle again. Must ignore trailing ANSI or we wait until timeout."""
+    return bool(PROMPT_RE.search(strip_ansi(text)))
+
+
 def strip_prompt(text: str) -> str:
-    return PROMPT_RE.sub("", text)
+    return PROMPT_RE.sub("", strip_ansi(text))
 
 
 def parse_vgpoint_status(text: str) -> Optional[VgPointStatus]:
@@ -392,36 +450,125 @@ def extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
+def extract_json_array(text: str) -> Optional[list]:
+    start = text.find("[")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text[start:], start):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+                return data if isinstance(data, list) else None
+    return None
+
+
+def _blank(v) -> bool:
+    return v is None or v == "" or v == "-"
+
+
+def _opt_num_field(v) -> Optional[float]:
+    if _blank(v):
+        return None
+    return float(v)
+
+
+def _point_from_dict(p: dict) -> Point:
+    unit = "" if _blank(p.get("unit")) else str(p.get("unit"))
+    cmp = "" if _blank(p.get("cmp")) else str(p.get("cmp"))
+    dtype = p.get("dtype")
+    if _blank(dtype):
+        dtype = "int16"
+    fail_n = p.get("fail_n", 3)
+    if _blank(fail_n):
+        fail_n = 3
+    return Point(
+        tag=str(p.get("tag", "") or ""),
+        addr=int(p.get("addr", 0) or 0),
+        fc=int(p.get("fc", 3) or 3),
+        reg=int(p.get("reg", 0) or 0),
+        qty=int(p.get("qty", 1) or 1),
+        dtype=str(dtype),
+        scale=1.0 if _blank(p.get("scale")) else float(p.get("scale")),
+        unit=unit,
+        cmp=cmp,
+        warn=_opt_num_field(p.get("warn")),
+        crit=_opt_num_field(p.get("crit")),
+        fail_n=int(fail_n),
+    )
+
+
 def parse_point_table_json(text: str, path: str = "") -> Optional[PointTable]:
-    obj = extract_json_object(text)
-    if not obj or "points" not in obj:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    data = None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = extract_json_object(text)
+        if data is None:
+            data = extract_json_array(text)
+    if isinstance(data, list):
+        obj = {"schema_version": 1, "points": data}
+    elif isinstance(data, dict):
+        obj = data
+        if "points" not in obj:
+            return None
+    else:
         return None
     bus = obj.get("bus") or {}
     table = PointTable(
-        schema_version=int(obj.get("schema_version", 1)),
+        schema_version=int(obj.get("schema_version", 1) or 1),
         device=str(bus.get("device", "")),
         baud=int(bus.get("baud", 0) or 0),
         hits=[int(x) for x in obj.get("hits") or []],
         path=path,
     )
     for p in obj.get("points") or []:
-        table.points.append(
-            Point(
-                tag=str(p.get("tag", "")),
-                addr=int(p.get("addr", 0)),
-                fc=int(p.get("fc", 3)),
-                reg=int(p.get("reg", 0)),
-                qty=int(p.get("qty", 1)),
-                dtype=str(p.get("dtype", "int16")),
-                scale=float(p.get("scale", 1.0)),
-                unit=str(p.get("unit", "")),
-                cmp=str(p.get("cmp", "") or ""),
-                warn=p.get("warn") if p.get("warn") is not None else None,
-                crit=p.get("crit") if p.get("crit") is not None else None,
-                fail_n=int(p.get("fail_n", 3)),
-            )
-        )
+        if not isinstance(p, dict):
+            continue
+        table.points.append(_point_from_dict(p))
     return table
+
+
+def prepare_import_rows(points: list[Point]) -> list[ImportRow]:
+    """Validate points for batch import. Any row.error blocks starting the import."""
+    seen: set[str] = set()
+    rows: list[ImportRow] = []
+    for i, point in enumerate(points):
+        err = ""
+        cmd = ""
+        if i >= MAX_POINTS:
+            err = f"超过 {MAX_POINTS} 点上限"
+        elif point.tag in seen:
+            err = "文件内 tag 重复"
+        else:
+            seen.add(point.tag)
+            try:
+                cmd = cmd_point_add_from_point(point)
+            except (ProtocolError, ValueError, TypeError) as exc:
+                err = str(exc)
+        rows.append(ImportRow(point=point, error=err, add_cmd=cmd))
+    return rows
 
 
 def parse_test_read(text: str) -> Optional[TestReadResult]:
